@@ -36,6 +36,8 @@ const combinedAuth = (req, res, next) => {
 
 // Public routes
 router.get('/download', agentController.downloadAgent);
+router.get('/version', agentController.getVersion);
+router.get('/health', agentController.getHealth);
 router.post('/register', agentController.register);
 router.get('/check-device/:deviceId', agentController.checkDevice);
 router.post('/heartbeat', agentController.heartbeat);

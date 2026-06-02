@@ -7,15 +7,27 @@ const prisma = require('../../config/db');
 const { getIO } = require('../../socket/server');
 const { getOrganizationId } = require('../../utils/orgId');
 
+const invitationService = require('../auth/invitation.service');
+
 const register = async (req, res) => {
     try {
-        const { employeeId, email, password, name, deviceId, systemInfo } = req.body;
+        const { employeeId, email, password, name, deviceId, systemInfo, inviteToken } = req.body;
         
         let targetEmployeeId = employeeId;
         let user = null;
+        let invitedEmployee = null;
 
         if (!email || !password || !deviceId) {
             return errorResponse(res, 'Email, Password and Device ID are required', 400);
+        }
+
+        if (inviteToken) {
+            try {
+                invitedEmployee = await invitationService.consumeInvitationForAgent(inviteToken, email);
+                targetEmployeeId = invitedEmployee.id;
+            } catch (invErr) {
+                return errorResponse(res, invErr.message, 400);
+            }
         }
 
         // 1. Find or Create User/Employee
@@ -27,13 +39,14 @@ const register = async (req, res) => {
         if (!user) {
             console.log(`User record not found for: ${email}. Checking for existing employee...`);
             
-            // User doesn't exist, check if Employee already exists by email
-            let existingEmployee = await prisma.employee.findUnique({ where: { email } });
+            let existingEmployee = invitedEmployee || await prisma.employee.findUnique({ where: { email } });
             
             if (!existingEmployee) {
                 console.log(`Creating new employee for: ${email}`);
-                // Find first organization
-                const org = await prisma.organization.findFirst();
+                let org = await prisma.organization.findUnique({ where: { id: 'default-org-id' } });
+                if (!org) {
+                    org = await prisma.organization.findFirst();
+                }
                 if (!org) throw new Error('No organization found in system. Please setup organization first.');
 
                 existingEmployee = await prisma.employee.create({
@@ -42,7 +55,8 @@ const register = async (req, res) => {
                         email,
                         organizationId: org.id,
                         role: 'EMPLOYEE',
-                        status: 'ACTIVE'
+                        status: 'ACTIVE',
+                        computerType: 'COMPANY',
                     }
                 });
             }
@@ -61,6 +75,14 @@ const register = async (req, res) => {
             });
             
             targetEmployeeId = existingEmployee.id;
+
+            await prisma.employee.update({
+                where: { id: existingEmployee.id },
+                data: {
+                    fullName: name || existingEmployee.fullName,
+                    status: 'ACTIVE',
+                },
+            });
         } else {
             // User exists, verify password
             const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -91,6 +113,13 @@ const register = async (req, res) => {
                 targetEmployeeId = existingEmployee.id;
             } else {
                 targetEmployeeId = user.employee.id;
+            }
+
+            if (name && user.employee) {
+                await prisma.employee.update({
+                    where: { id: user.employee.id },
+                    data: { fullName: name, status: 'ACTIVE' },
+                });
             }
         }
 
@@ -184,12 +213,13 @@ const logActivity = async (req, res) => {
                 console.warn(`[AgentController] Screenshot event skipped (not persisted) for employee ${employeeId}`);
             }
 
-            // 2. Update activity stream
+            // 2. Update activity stream (resolved app name from service)
             io.to(room).emit('activity:update', {
                 employeeId,
-                activeApp: data.activeApp || 'Unknown',
+                activeApp: logResult?.cleanAppName || data.activeApp || 'Unknown',
                 activeWindow: data.activeWindow || 'Unknown',
                 idleTime: data.idleTime || 0,
+                productivity: logResult?.productivity || 'NEUTRAL',
                 location: data.location ? `${data.location.city}, ${data.location.country}` : 'Remote',
                 timestamp: new Date()
             });
@@ -208,15 +238,40 @@ const logActivity = async (req, res) => {
     }
 };
 
+const getVersion = async (req, res) => {
+    try {
+        const packageJsonPath = path.join(__dirname, '../../../../agent-source/package.json');
+        let version = '1.0.2';
+        if (fs.existsSync(packageJsonPath)) {
+            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            version = pkg.version || '1.0.2';
+        }
+        
+        return successResponse(res, {
+            version,
+            buildNumber: '1',
+            releaseDate: '2026-06-01',
+            downloadUrl: '/api/agent/download'
+        }, 'Agent version retrieved');
+    } catch (error) {
+        console.error('Agent getVersion error:', error);
+        return errorResponse(res, 'Failed to get version metadata', 500);
+    }
+};
+
+const getHealth = async (req, res) => {
+    return successResponse(res, { status: 'healthy' }, 'Agent health checked successfully');
+};
+
 const downloadAgent = async (req, res) => {
     try {
-        const filePath = path.join(__dirname, '../../../public/agent/ems-tracker-setup.exe');
+        const filePath = path.join(__dirname, '../../../public/agent/EMS-Tracker-latest.exe');
         
         if (!fs.existsSync(filePath)) {
             return errorResponse(res, 'Agent installer not found. Please contact administrator.', 404);
         }
         
-        res.download(filePath, 'ems-tracker-setup.exe');
+        res.download(filePath, 'EMS-Tracker-latest.exe');
     } catch (error) {
         console.error('Agent download error:', error);
         return errorResponse(res, 'Failed to download agent', 500);
@@ -338,6 +393,8 @@ module.exports = {
     heartbeat,
     logActivity,
     downloadAgent,
+    getVersion,
+    getHealth,
     getStatus,
     listAgents,
     updateStatus,

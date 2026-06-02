@@ -1,6 +1,10 @@
 const prisma = require('../../config/db');
 const attendanceService = require('../attendance/attendance.service');
 const { uploadImageBuffer } = require('../../utils/imageStorage');
+const { HEARTBEAT_SECONDS } = require('../../utils/resolveAppActivity');
+const { resolveAppActivityForOrg } = require('../../utils/resolveAppActivityForOrg');
+const { onAgentPulse, processStaleAttendanceForEmployee } = require('../../utils/attendanceSession');
+const { upsertAppUsageLog } = require('../../utils/upsertAppUsageLog');
 
 /**
  * Register a new device agent for an employee
@@ -20,6 +24,7 @@ const registerAgent = async (employeeId, deviceId, systemInfo) => {
         update: {
             deviceId,
             systemInfo,
+            status: 'active',
             lastSeen: new Date(),
         },
         create: {
@@ -122,15 +127,11 @@ const heartbeat = async (deviceId) => {
         },
     });
 
-    // Auto Clock-In if not already clocked in
-    if (agent && agent.employeeId) {
+    if (agent?.employeeId) {
         try {
-            await attendanceService.clockIn(agent.employeeId, agent.organizationId || 'default-org-id');
+            await onAgentPulse(agent.employeeId, agent.organizationId || 'default-org-id');
         } catch (err) {
-            // Ignore "Already clocked in"
-            if (!err.message.includes('Already clocked in')) {
-                console.error('[AgentService] Auto clock-in on heartbeat failed:', err.message);
-            }
+            console.error('[AgentService] Heartbeat attendance pulse failed:', err.message);
         }
     }
     return agent;
@@ -153,17 +154,24 @@ const logActivity = async (employeeId, data) => {
     if (!employee) throw new Error('Employee not found');
     console.log(`[AgentService] Processing activity for employee: ${employeeId}. Screenshot included: ${!!screenshotUrl}`);
 
-    // Auto Clock-In if not already clocked in
     try {
-        await attendanceService.clockIn(employeeId, employee.organizationId);
+        await onAgentPulse(employeeId, employee.organizationId);
     } catch (err) {
-        // Ignore "Already clocked in"
         if (!err.message.includes('Already clocked in')) {
-            console.error(`[AgentService:${employeeId}] Auto clock-in on activity failed:`, err.message);
+            console.error(`[AgentService:${employeeId}] Activity pulse failed:`, err.message);
         }
     }
+    await processStaleAttendanceForEmployee(employeeId);
 
-    console.log(`[AgentService:${employeeId}] Logging activities: App=${activeApp}, Idle=${idleTime}s`);
+    const activityType = (idleTime || 0) > 60 ? 'IDLE' : 'ACTIVE';
+    const resolved = await resolveAppActivityForOrg(
+        employee.organizationId,
+        activeApp,
+        activeWindow
+    );
+    const { cleanAppName, productivity, appCategory, appDomain } = resolved;
+
+    console.log(`[AgentService:${employeeId}] Logging activities: App=${cleanAppName}, Idle=${idleTime}s, Productivity=${productivity}`);
 
     // 1. Save Activity Log
     try {
@@ -171,14 +179,28 @@ const logActivity = async (employeeId, data) => {
             data: {
                 employeeId,
                 organizationId: employee.organizationId,
-                activityType: (idleTime || 0) > 60 ? 'IDLE' : 'ACTIVE',
-                productivity: 'NEUTRAL', 
-                duration: 60, 
-                appWebsite: activeApp || 'Unknown',
+                activityType,
+                productivity,
+                duration: HEARTBEAT_SECONDS,
+                appWebsite: cleanAppName,
                 timestamp: timestamp ? new Date(timestamp) : new Date()
             }
         });
     } catch (e) { console.error(`[AgentService:${employeeId}] ActivityLog failed:`, e.message); }
+
+    // 1b. App usage for Apps & Websites reports
+    if (activityType === 'ACTIVE') {
+        try {
+            await upsertAppUsageLog({
+                employeeId,
+                organizationId: employee.organizationId,
+                appName: cleanAppName,
+                domain: appDomain,
+                category: appCategory,
+                productivity,
+            });
+        } catch (e) { console.error(`[AgentService:${employeeId}] AppUsageLog failed:`, e.message); }
+    }
 
     // 2. Update Live Activity
     try {
@@ -186,7 +208,7 @@ const logActivity = async (employeeId, data) => {
             data: {
                 employeeId,
                 organizationId: employee.organizationId,
-                activeApp: activeApp || 'Unknown',
+                activeApp: cleanAppName,
                 activeWindow: activeWindow || 'Unknown',
                 keystrokes: 0,
                 mouseClicks: 0,
@@ -298,7 +320,14 @@ const logActivity = async (employeeId, data) => {
         });
     } catch (e) { console.error('Agent update failed:', e.message); }
 
-    return { success: true, screenshotSaved, finalScreenshotUrl };
+    return {
+        success: true,
+        screenshotSaved,
+        finalScreenshotUrl,
+        cleanAppName,
+        productivity,
+        activityType,
+    };
 };
 
 /**
@@ -363,10 +392,10 @@ const stopTracking = async (employeeId) => {
         }
     }
     
-    // Update agent status to inactive
+    // Update agent lastSeen, but preserve status (keep it 'active' so they can restart easily)
     await prisma.agent.updateMany({
         where: { employeeId },
-        data: { status: 'inactive', lastSeen: new Date() }
+        data: { lastSeen: new Date() }
     });
 
     return { success: true };

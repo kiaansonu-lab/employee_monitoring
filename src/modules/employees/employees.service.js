@@ -23,6 +23,10 @@ const getEmployees = async (organizationId, filter = {}) => {
             tracking: {
                 orderBy: { timestamp: 'desc' },
                 take: 1
+            },
+            liveActivities: {
+                orderBy: { createdAt: 'desc' },
+                take: 1
             }
         },
         orderBy: {
@@ -73,13 +77,16 @@ const inviteEmployee = async (data) => {
         });
     }
 
+    const workMode = data.location || 'Remote';
+
     return await prisma.employee.create({
         data: {
             fullName: data.fullName,
             email: data.email,
             organizationId: data.organizationId,
             teamId: data.teamId,
-            location: data.location || 'Remote',
+            workMode,
+            location: null,
             computerType: data.computerType || 'PERSONAL',
             trackingSettingId: trackingSetting?.id,
             role: 'EMPLOYEE',

@@ -17,12 +17,13 @@ function getDateRangeFilter(startDate, endDate) {
     return { gte: start, lte: end };
 }
 
-// Helper to format seconds to HH:mm
+// Helper to format seconds to 00h 00m 00s
 function formatToHM(seconds) {
-    if (!seconds) return '00:00';
+    if (!seconds) return '00h 00m 00s';
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
-    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+    const secs = Math.floor(seconds % 60);
+    return `${hrs.toString().padStart(2, '0')}h ${mins.toString().padStart(2, '0')}m ${secs.toString().padStart(2, '0')}s`;
 }
 
 // Calculate summary metrics

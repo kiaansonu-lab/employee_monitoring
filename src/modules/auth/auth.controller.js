@@ -1,12 +1,22 @@
 const authService = require('./auth.service');
 const { successResponse, errorResponse } = require('../../utils/response');
-const { registerSchema, loginSchema } = require('./auth.validation');
+const { registerSchema, registerAdminSchema, loginSchema } = require('./auth.validation');
 
 const register = async (req, res, next) => {
     try {
         const validatedData = registerSchema.parse(req.body);
         const result = await authService.register(validatedData);
         return successResponse(res, result, 'User registered successfully', 201);
+    } catch (error) {
+        next(error);
+    }
+};
+
+const registerAdmin = async (req, res, next) => {
+    try {
+        const validatedData = registerAdminSchema.parse(req.body);
+        const result = await authService.registerAdmin(validatedData);
+        return successResponse(res, result, 'Admin registered successfully', 201);
     } catch (error) {
         next(error);
     }
@@ -71,6 +81,7 @@ const forgotPassword = async (req, res, next) => {
 
 module.exports = {
     register,
+    registerAdmin,
     login,
     logout,
     getMe,

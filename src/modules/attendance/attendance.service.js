@@ -122,10 +122,11 @@ const attendanceService = {
         if (filters.employeeId) where.employeeId = filters.employeeId;
         if (filters.teamId) where.employee = { teamId: filters.teamId };
         if (filters.startDate && filters.endDate) {
-            where.date = {
-                gte: new Date(filters.startDate),
-                lte: new Date(filters.endDate),
-            };
+            const start = new Date(filters.startDate);
+            start.setHours(0, 0, 0, 0);
+            const end = new Date(filters.endDate);
+            end.setHours(23, 59, 59, 999);
+            where.date = { gte: start, lte: end };
         }
 
         return await prisma.attendance.findMany({
@@ -135,14 +136,101 @@ const attendanceService = {
                     select: {
                         fullName: true,
                         location: true,
+                        teamId: true,
                         team: {
-                            select: { name: true, description: true }
-                        }
+                            select: { name: true, description: true },
+                        },
+                    },
+                },
+            },
+            orderBy: [{ date: 'desc' }, { clockIn: 'desc' }],
+        });
+    },
+
+    /**
+     * One row per employee per day (merged sessions, correct total hours).
+     */
+    getTimesheetsGrouped: async (organizationId, filters = {}) => {
+        const where = { organizationId };
+        if (filters.employeeId) where.employeeId = filters.employeeId;
+        if (filters.teamId) where.employee = { teamId: filters.teamId };
+        if (filters.startDate && filters.endDate) {
+            const start = new Date(filters.startDate);
+            start.setHours(0, 0, 0, 0);
+            const end = new Date(filters.endDate);
+            end.setHours(23, 59, 59, 999);
+            where.date = { gte: start, lte: end };
+        }
+
+        const records = await prisma.attendance.findMany({
+            where,
+            include: {
+                employee: {
+                    select: {
+                        fullName: true,
+                        location: true,
+                        teamId: true,
+                        team: { select: { name: true, description: true } },
+                    },
+                },
+            },
+            orderBy: [{ date: 'desc' }, { clockIn: 'asc' }],
+        });
+
+        const map = new Map();
+        const now = Date.now();
+
+        records.forEach((row) => {
+            const dateKey = new Date(row.date).toISOString().split('T')[0];
+            const key = `${row.employeeId}_${dateKey}`;
+
+            if (!map.has(key)) {
+                map.set(key, {
+                    id: key,
+                    employeeId: row.employeeId,
+                    organizationId: row.organizationId,
+                    employee: row.employee,
+                    date: row.date,
+                    clockIn: row.clockIn,
+                    clockOut: null,
+                    duration: 0,
+                    sessionCount: 0,
+                    late: false,
+                    hasOpen: false,
+                });
+            }
+
+            const agg = map.get(key);
+            agg.sessionCount += 1;
+            if (row.late) agg.late = true;
+
+            if (row.clockIn && (!agg.clockIn || new Date(row.clockIn) < new Date(agg.clockIn))) {
+                agg.clockIn = row.clockIn;
+            }
+
+            if (!row.clockOut) {
+                agg.hasOpen = true;
+                agg.clockOut = null;
+                agg.duration += Math.floor((now - new Date(row.clockIn).getTime()) / 1000);
+            } else {
+                const seg =
+                    row.duration ||
+                    Math.floor((new Date(row.clockOut) - new Date(row.clockIn)) / 1000);
+                agg.duration += seg;
+                if (!agg.hasOpen) {
+                    if (!agg.clockOut || new Date(row.clockOut) > new Date(agg.clockOut)) {
+                        agg.clockOut = row.clockOut;
                     }
                 }
-            },
-            orderBy: { date: 'desc' },
+            }
         });
+
+        return Array.from(map.values())
+            .map(({ hasOpen, ...agg }) => ({
+                ...agg,
+                isGrouped: true,
+            }))
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
     },
 
     addManualTime: async (data) => {

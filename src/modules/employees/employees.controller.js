@@ -21,6 +21,13 @@ const getEmployees = async (req, res, next) => {
             let agentStatus = 'inactive';
             let lastSeen = null;
             let currentActivity = 'Idle';
+            let activeApp = '';
+            let activeWindow = '';
+
+            if (emp.liveActivities && emp.liveActivities.length > 0) {
+                activeApp = emp.liveActivities[0].activeApp;
+                activeWindow = emp.liveActivities[0].activeWindow;
+            }
 
             if (emp.agent) {
                 lastSeen = emp.agent.lastSeen;
@@ -34,12 +41,21 @@ const getEmployees = async (req, res, next) => {
                 currentActivity = emp.tracking[0].activityStatus || 'Idle';
             }
 
+            const WORK_MODES = ['Remote', 'Office', 'Hybrid'];
+            const workMode = emp.workMode || (WORK_MODES.includes(emp.location) ? emp.location : 'Remote');
+            const liveLocation = emp.location && !WORK_MODES.includes(emp.location)
+                ? emp.location
+                : (emp.tracking?.[0]?.location?.split(',')[0]?.trim() || null);
+            const locationDisplay = `${liveLocation || '—'} (${workMode})`;
+
             return {
                 id: emp.id,
                 name: emp.fullName, // Map fullName to name for frontend compatibility
                 email: emp.email,
                 team: emp.team ? emp.team.name : 'Unassigned',
-                location: emp.location,
+                location: locationDisplay,
+                liveLocation,
+                workMode,
                 status: emp.status.toLowerCase(),
                 avatar: emp.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(emp.fullName)}&background=random`,
                 role: emp.role,
@@ -49,7 +65,9 @@ const getEmployees = async (req, res, next) => {
                 hourlyRate: emp.hourlyRate,
                 agentStatus,
                 lastSeen,
-                currentActivity
+                currentActivity,
+                activeApp,
+                activeWindow
             };
         });
 
@@ -105,19 +123,31 @@ const inviteEmployee = async (req, res, next) => {
             employee = await employeesService.inviteEmployee(validatedData);
         }
         
-        // 2. Generate invitation token and link
-        const { setupLink } = await invitationService.sendInvitation(
-            validatedData.email, 
-            role,
-            validatedData.organizationId,
-            validatedData.fullName
-        );
+        let inviteResult = {};
+        if (role === 'EMPLOYEE' && validatedData.computerType === 'PERSONAL') {
+            inviteResult = await invitationService.sendEmployeeAgentInvitation({
+                email: validatedData.email,
+                fullName: validatedData.fullName,
+                organizationId: validatedData.organizationId,
+                workMode: validatedData.location || 'Remote',
+            });
+        } else {
+            const { setupLink } = await invitationService.sendInvitation(
+                validatedData.email,
+                role,
+                validatedData.organizationId,
+                validatedData.fullName
+            );
+            inviteResult = { setupLink };
+        }
 
         res.status(201).json({
             success: true,
-            message: "Employee invited successfully",
+            message: inviteResult.emailSent === false && inviteResult.emailSimulated
+                ? 'Employee invited — check server console for email link (SMTP not configured)'
+                : 'Employee invited — setup email sent',
             data: employee,
-            setupLink: setupLink // Returning the link for testing
+            ...inviteResult,
         });
     } catch (error) {
         next(error);

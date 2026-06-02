@@ -68,6 +68,16 @@ const productivityController = {
             return errorResponse(res, error.message);
         }
     },
+
+    autoLabel: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const result = await productivityService.autoLabelApps(organizationId);
+            return successResponse(res, result, 'Auto-labeling completed');
+        } catch (error) {
+            return errorResponse(res, error.message);
+        }
+    },
 };
 
 module.exports = productivityController;

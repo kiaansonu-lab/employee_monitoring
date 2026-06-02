@@ -287,6 +287,80 @@ const logout = async (employeeId) => {
     });
 };
 
+/**
+ * Register a new Admin along with a new Organization and Employee
+ */
+const registerAdmin = async (adminData) => {
+    const { companyName, name, email, password } = adminData;
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+        throw new Error('User already exists with this email');
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create Organization, Employee, and User in a transaction
+    return await prisma.$transaction(async (tx) => {
+        // 1. Create Organization
+        const organization = await tx.organization.create({
+            data: {
+                legalName: companyName,
+                timeZone: "UTC+5:30 (IST)", // Set default Indian Standard Time
+                workStartTime: "09:00",
+                workEndTime: "18:00",
+                workDays: "Monday,Tuesday,Wednesday,Thursday,Friday"
+            }
+        });
+
+        // 2. Create Employee with ADMIN role
+        const employee = await tx.employee.create({
+            data: {
+                fullName: name,
+                email,
+                role: 'ADMIN',
+                organizationId: organization.id,
+                status: 'ACTIVE',
+                hourlyRate: 0.0,
+            },
+        });
+
+        // 3. Create User linked to Employee with ADMIN role
+        const user = await tx.user.create({
+            data: {
+                email,
+                password: hashedPassword,
+                role: 'ADMIN',
+                employeeId: employee.id,
+                name: name,
+            },
+        });
+
+        // Generate Token
+        const token = generateToken({ 
+            userId: user.id, 
+            role: user.role, 
+            employeeId: employee.id,
+            organizationId: employee.organizationId 
+        });
+
+        return { 
+            token, 
+            user: { 
+                id: user.id, 
+                email: user.email, 
+                role: user.role, 
+                fullName: employee.fullName,
+                name: employee.fullName,
+                employeeId: employee.id, 
+                organizationId: employee.organizationId 
+            } 
+        };
+    });
+};
+
 module.exports = {
     register,
     login,
@@ -294,5 +368,6 @@ module.exports = {
     logout,
     updateProfile,
     changePassword,
-    forgotPassword
+    forgotPassword,
+    registerAdmin
 };

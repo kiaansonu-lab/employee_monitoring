@@ -17,5 +17,6 @@ router.delete('/tags/:id', roleMiddleware(['ADMIN', 'MANAGER']), productivityCon
 
 // Rule/Label Assignment
 router.post('/rules', roleMiddleware(['ADMIN', 'MANAGER']), productivityController.updateRule);
+router.post('/auto-label', roleMiddleware(['ADMIN', 'MANAGER']), productivityController.autoLabel);
 
 module.exports = router;

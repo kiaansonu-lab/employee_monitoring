@@ -3,7 +3,9 @@ const { verifyToken } = require('../utils/jwt');
 const prisma = require('../config/db');
 const logger = require('../utils/logger');
 const activityService = require('../modules/activity/activity.service');
-const { APPS } = require('../modules/productivity/productivity.service');
+const { HEARTBEAT_SECONDS } = require('../utils/resolveAppActivity');
+const { resolveAppActivityForOrg } = require('../utils/resolveAppActivityForOrg');
+const { upsertAppUsageLog } = require('../utils/upsertAppUsageLog');
 
 // In-memory cache for live employee sessions
 // Map: employeeId -> { socketId, organizationId, status, lastActivity }
@@ -120,10 +122,6 @@ const initSocketServer = (server) => {
             if (session) {
                 session.lastActivity = new Date();
                 
-                // Status logic: 
-                // If user is on BREAK, only return to ONLINE if idleTime is low AND we want to auto-resume
-                // In this system, we prefer manual RESUME, so keep BREAK if it's set.
-                // Guard: If status is DEACTIVATED, don't auto-update it
                 if (session.status === 'DEACTIVATED') return;
 
                 let newStatus = session.status === 'BREAK' ? 'BREAK' : (idleTime > 300 ? 'OFFLINE' : (idleTime > 60 ? 'IDLE' : 'ONLINE'));
@@ -151,41 +149,39 @@ const initSocketServer = (server) => {
                     }
                 });
 
-                // --- AGGREGATION: Ingest into ActivityLog for Dashboard Metrics ---
-                
-                // 1. Determine Activity Type
                 const activityType = idleTime > 60 ? 'IDLE' : 'ACTIVE';
-                
-                // 2. Determine Productivity (Heuristic)
-                let productivity = 'NEUTRAL';
-                if (activityType === 'ACTIVE' && activeApp) {
-                    const knownApp = APPS.find(a => 
-                        activeApp.toLowerCase().includes(a.name.toLowerCase()) || 
-                        (a.domain && activeApp.toLowerCase().includes(a.domain.toLowerCase()))
-                    );
-                    if (knownApp) {
-                        productivity = knownApp.productivity;
-                    } else if (activeApp.toLowerCase().includes('visual studio') || activeApp.toLowerCase().includes('code')) {
-                        productivity = 'PRODUCTIVE';
-                    }
-                }
+                const { cleanAppName, productivity, appCategory, appDomain } = await resolveAppActivityForOrg(
+                    organizationId,
+                    activeApp,
+                    activeWindow
+                );
 
-                // 3. Create ActivityLog entry
-                // Using 30 seconds as duration for each heartbeat log
                 await activityService.createActivityLog({
                     employeeId,
                     organizationId,
                     activityType,
                     productivity,
-                    duration: 30, // 30 seconds per heartbeat
-                    appWebsite: activeApp || 'Unknown',
+                    duration: HEARTBEAT_SECONDS,
+                    appWebsite: cleanAppName,
                     timestamp: new Date()
                 });
 
-                // Broadcast to admin dashboard
+                if (activityType === 'ACTIVE') {
+                    await upsertAppUsageLog({
+                        employeeId,
+                        organizationId,
+                        appName: cleanAppName,
+                        domain: appDomain,
+                        category: appCategory,
+                        productivity,
+                    });
+                }
+
+                // Broadcast to admin dashboard with clean app name
                 io.to(`org_${organizationId}`).emit('activity:update', {
                     employeeId,
                     ...data,
+                    activeApp: cleanAppName,  // send clean name to frontend
                     timestamp: new Date()
                 });
             } catch (err) {
@@ -261,27 +257,7 @@ const initSocketServer = (server) => {
                         });
                     }
 
-                    // Auto Clock-Out mechanism after a short grace period (e.g., 2 minutes)
-                    if (role === 'EMPLOYEE') {
-                        setTimeout(async () => {
-                            // Check if the user reconnected during the grace period
-                            const reconnectedSession = liveSessions.get(employeeId);
-                            if (!reconnectedSession) {
-                                try {
-                                    const attendanceService = require('../modules/attendance/attendance.service');
-                                    logger.info(`Auto clocking out employee ${employeeId} due to disconnect grace period expiry`);
-                                    await attendanceService.clockOut(employeeId);
-                                    
-                                    // Notify the organization that this session was ended
-                                    io.to(`org_${organizationId}`).emit('attendance:auto_clockout', { employeeId });
-                                } catch (err) {
-                                    if (!err.message.includes('No active clock-in session found')) {
-                                        logger.error(`Error auto clocking out employee ${employeeId}:`, err);
-                                    }
-                                }
-                            }
-                        }, 2 * 60 * 1000); // 2 minutes grace period
-                    }
+                    // Clock-out is handled by 10-minute agent silence (attendanceSession sweep), not socket disconnect
                 }
             }
         });

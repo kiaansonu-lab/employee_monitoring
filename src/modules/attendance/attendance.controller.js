@@ -41,7 +41,10 @@ const attendanceController = {
                 filters.employeeId = employeeId;
             }
 
-            const timesheets = await attendanceService.getTimesheets(organizationId, filters);
+            const grouped = req.query.grouped !== 'false';
+            const timesheets = grouped
+                ? await attendanceService.getTimesheetsGrouped(organizationId, filters)
+                : await attendanceService.getTimesheets(organizationId, filters);
             return successResponse(res, timesheets, 'Timesheets fetched successfully');
         } catch (error) {
             return errorResponse(res, error.message);
